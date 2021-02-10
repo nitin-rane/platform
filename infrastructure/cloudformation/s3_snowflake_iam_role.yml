@@ -1,0 +1,62 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Creates snowflake roles and access policy for Snowflake Stage
+
+Parameters:
+  Environment:
+    Description: Defines which environment the resources are
+    Type: String
+  SnowflakeExternalId:
+    Description: Stage credential AWS_EXTERNAL_ID
+    Type: String
+    NoEcho: true
+  SnowflakeAwsUserArn:
+    Description: Stage credential SNOWFLAKE_USER_ARN
+    Type: String
+  HgServiceTagValue:
+    Description: CFN tag value for the tag `hg.service`
+    Type: String
+  HgEnvironmentTagValue:
+    Description: CFN tag value for the tag `hg.environment`
+    Type: String
+    AllowedValues:
+      - DEV
+      - TEST
+      - PROD
+
+Resources:
+  SnowflakeUserRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref SnowflakeAwsUserArn
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref SnowflakeExternalId
+      Policies:
+        - PolicyName: snowflake
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                - s3:GetObject
+                - s3:GetObjectVersion
+                Resource:
+                  - !Sub "arn:aws:s3:::hg-data-lake-${Environment}"
+                  - !Sub "arn:aws:s3:::hg-data-lake-${Environment}/*"
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::hg-data-lake-${Environment}"
+                  - !Sub "arn:aws:s3:::hg-data-lake-${Environment}/*"
+      Tags:
+        - Key: hg.service
+          Value: !Ref HgServiceTagValue
+        - Key: hg.environment
+          Value: !Ref HgEnvironmentTagValue

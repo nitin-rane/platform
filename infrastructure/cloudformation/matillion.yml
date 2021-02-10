@@ -1,0 +1,639 @@
+Conditions:
+  IsGovCloud: !Equals
+    - !Ref 'AWS::Region'
+    - us-gov-west-1
+Description: 'Matillion ETL for Snowflake CloudFormation: Single-Node Enterprise with
+  existing AWS resources'
+Mappings:
+  RegionMap:
+    ap-northeast-1:
+      AMI: ami-065d51da5e4f1a3f2
+    ap-northeast-2:
+      AMI: ami-0ba6facc78032b882
+    ap-south-1:
+      AMI: ami-03826da36c1b8ddf3
+    ap-southeast-1:
+      AMI: ami-0f7707ada48662c05
+    ap-southeast-2:
+      AMI: ami-0e2b512d41b8d23bb
+    ca-central-1:
+      AMI: ami-059c2f00d37dcb960
+    eu-central-1:
+      AMI: ami-055843ff9ee8e6c9c
+    eu-west-1:
+      AMI: ami-0d8d0092515e5d61e
+    eu-west-2:
+      AMI: ami-056d4c004bcece32a
+    eu-west-3:
+      AMI: ami-0d99fb04a1d6ce96b
+    sa-east-1:
+      AMI: ami-0abb9554aed7a8b99
+    us-east-1:
+      AMI: ami-0a72a5b22dc9dd984
+    us-east-2:
+      AMI: ami-0062ac625b0bb370c
+    us-west-1:
+      AMI: ami-0cf2b62fe75651882
+    us-west-2:
+      AMI: ami-0d99d93d406e77587
+    us-gov-east-1:
+      AMI: ami-0a904e7ac6dabca50
+    us-gov-west-1:
+      AMI: ami-0251657857b958a50
+Outputs:
+  DefaultMatillionUsername:
+    Description: Default Matillion Username
+    Value: ec2-user
+  Ec2Instance0PrivateEndpoint:
+    Description: Private Endpoint for Matillion Instance
+    Value: !GetAtt 'Ec2Instance0.PrivateIp'
+  Ec2Instance0PublicEndpoint:
+    Description: Public Endpoint for Matillion Instance
+    Value: !Join
+      - ''
+      - - http://
+        - !GetAtt 'Ec2Instance0.PublicDnsName'
+  Ec2Instance0id:
+    Description: Instance ID (default password)
+    Value: !Ref 'Ec2Instance0'
+Parameters:
+  CronStartSchedule:
+    Default: cron(0 6 ? * MON-FRI *)
+    Description: Cron schedule to turn on Matillion instance and Postgres (in UTC)
+    Type: String
+  CronStopSchedule:
+    Default: cron(0 17 ? * MON-FRI *)
+    Description: Cron schedule to turn off Matillion instance and Postgres (in UTC)
+    Type: String
+  InstanceTypeParameter:
+    AllowedValues:
+      - m5.large
+      - m5.xlarge
+    Default: m5.large
+    Description: Matillion instance(s) size. Larger sizes allow for running more concurrent
+      tasks, See https://www.matillion.com/pricing/etl-for-snowflake/ for more info.
+    Type: String
+  KeyName:
+    Description: The selected key pair will be added to the set of ssh keys authorized
+      for this instance
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: matillion-etl-keypair
+  Subnet1:
+    Description: An existing Public subnet to launch the Matillion ec2 instance(s)
+      into.
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-04b6bad53a9885105
+  VPCId:
+    Description: The VPC in which to create security groups. This must be the VPC
+      containing the subnet(s).
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-09d861e26bb31dac7
+  MatillionHostedZone:
+    Description: The hosted zone for matillion.homegate.ch
+    Type: AWS::Route53::HostedZone::Id
+    Default: Z0550588214LUNWR348YK
+  AwsAccountNumberTestEnvironment:
+    Description: AWS account number of the test environment
+    Type: String
+    Default: 141388603688
+  AwsAccountNumberProdEnvironment:
+    Description: AWS account number of the test environment
+    Type: String
+    Default: 917327207047
+Resources:
+  CDCRoleForDMS:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - dms.amazonaws.com
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                Effect: Allow
+                Resource: '*'
+                Sid: CDCPermissionsForDMS
+          PolicyName: CDCPermissionsForDMS
+    Type: AWS::IAM::Role
+  CDCRoleForLambda:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - sqs:GetQueueUrl
+                  - sqs:SendMessage
+                Effect: Allow
+                Resource: '*'
+                Sid: CDCPermissionsForLambda
+          PolicyName: CDCPermissionsForLambda
+    Type: AWS::IAM::Role
+  Ec2Instance0:
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          commands:
+            setup:
+              command: /sbin/service tomcat8 stop && rm -r /var/log/tomcat8/catalina.out
+                && /usr/share/emerald/WEB-INF/classes/scripts/matillion_ensure.sh
+                && /sbin/service tomcat8 start
+    Properties:
+      IamInstanceProfile: !Ref 'MatillionInstanceProfile'
+      ImageId: !FindInMap
+        - RegionMap
+        - !Ref 'AWS::Region'
+        - AMI
+      InstanceType: !Ref 'InstanceTypeParameter'
+      KeyName: !Ref 'KeyName'
+      SecurityGroupIds:
+        - !Ref 'MatillionPublicAccessSecurityGroup'
+      SubnetId: !Ref 'Subnet1'
+      Tags:
+        - Key: Name
+          Value: Matillion-ETL
+      UserData: !Base64
+        Fn::Join:
+          - ''
+          - - "#!/bin/bash -xe \n"
+            - '/bin/cfn-init -v '
+            - ' --stack '
+            - !Ref 'AWS::StackName'
+            - ' --resource '
+            - Ec2Instance0
+            - ' --region '
+            - !Ref 'AWS::Region'
+    Type: AWS::EC2::Instance
+  MatillionInstanceProfile:
+    Properties:
+      Roles:
+        - !Ref 'MatillionRole'
+    Type: AWS::IAM::InstanceProfile
+  MatillionPublicAccessSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: MatillionPublicAccessSecurityGroup
+      VpcId: !Ref 'VPCId'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 195.48.42.97/32
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 195.48.42.97/32
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 195.48.42.97/32
+        # # GitLab runners
+        # test
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 3.121.161.155/32
+        # prod
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 18.197.203.180/32
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 18.157.69.124/32
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 3.126.89.18/32
+
+  MatillionRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - redshift:DescribeClusters
+                Effect: Allow
+                Resource:
+                  - '*'
+                Sid: StmtMinRedshift
+              - Action:
+                  - s3:ListAllMyBuckets
+                  - s3:ListBucket
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:GetBucketLocation
+                Effect: Allow
+                Resource:
+                  - '*'
+                Sid: StmtMinS3
+              - Action:
+                  - sqs:DeleteMessage
+                  - sqs:ListQueues
+                  - sqs:ReceiveMessage
+                  - sqs:SendMessage
+                  - sqs:GetQueueUrl
+                Effect: Allow
+                Resource:
+                  - '*'
+                Sid: StmtMinSQS
+              - Action:
+                  - rds:DescribeDBInstances
+                Effect: Allow
+                Resource:
+                  - '*'
+                Sid: StmtMinRDS
+              - Action:
+                  - ec2:CreateSnapshot
+                  - ec2:CreateTags
+                  - ec2:DescribeInstances
+                  - ec2:DescribeVolumes
+                Effect: Allow
+                Resource:
+                  - '*'
+                Sid: StmtMinEC2
+              - Action:
+                  - sns:ListTopics
+                  - sns:CreateTopic
+                  - sns:Publish
+                Effect: Allow
+                Resource:
+                  - '*'
+                Sid: StmtMinSNS
+              - Action:
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:ListMetrics
+                Effect: Allow
+                Resource:
+                  - '*'
+                Sid: StmtMinCloudwatch
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Effect: Allow
+                Resource:
+                  - !If
+                    - IsGovCloud
+                    - arn:aws-us-gov:logs:*:*:*
+                    - arn:aws:logs:*:*:*
+                Sid: StmtMinCloudwatchLogs
+              - Action:
+                  - kms:ListAliases
+                  - kms:Encrypt
+                  - kms:Decrypt
+                Effect: Allow
+                Resource:
+                  - '*'
+                Sid: StmtMinKMS
+              - Action:
+                  - dynamodb:ListTables
+                  - dynamodb:DescribeTable
+                  - dynamodb:Scan
+                Effect: Allow
+                Resource: '*'
+                Sid: StmtMinDynamoDB
+              - Action:
+                  - dms:CreateEndpoint
+                  - dms:CreateReplicationTask
+                  - dms:DeleteEndpoint
+                  - dms:DeleteReplicationTask
+                  - dms:DescribeConnections
+                  - dms:DescribeEndpoints
+                  - dms:DescribeReplicationInstances
+                  - dms:DescribeReplicationTasks
+                  - dms:ModifyEndpoint
+                  - dms:StartReplicationTask
+                  - dms:StopReplicationTask
+                  - dms:TestConnection
+                  - ec2:DescribeRegions
+                  - iam:ListRoles
+                  - iam:PassRole
+                  - lambda:AddPermission
+                  - lambda:CreateFunction
+                  - lambda:DeleteFunction
+                  - lambda:GetFunction
+                  - lambda:GetPolicy
+                  - lambda:RemovePermission
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                  - s3:GetBucketNotification
+                  - s3:ListAllMyBuckets
+                  - s3:PutBucketNotification
+                  - sqs:ChangeMessageVisibility
+                  - sqs:DeleteMessage
+                  - sqs:ListQueues
+                  - sqs:ReceiveMessage
+                Effect: Allow
+                Resource: '*'
+                Sid: CDCPermissions
+          PolicyName: MatillionRolePolicy
+    Type: AWS::IAM::Role
+
+  SharedSqsRequestQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: matillion-request-shared
+      MessageRetentionPeriod: 1209600
+      VisibilityTimeout: 30
+  SharedSqsRequestQueuesPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref SharedSqsRequestQueue
+      PolicyDocument:
+        Statement:
+          - Action:
+              - sqs:DeleteMessage
+              - sqs:ListQueues
+              - sqs:ReceiveMessage
+              - sqs:SendMessage
+              - sqs:GetQueueUrl
+            Effect: "Allow"
+            Resource: !GetAtt SharedSqsRequestQueue.Arn
+            Principal:
+              AWS:
+                - !Ref AwsAccountNumberTestEnvironment
+                - !Ref AwsAccountNumberProdEnvironment
+  ProdSqsSuccessQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: matillion-success-prod
+      MessageRetentionPeriod: 1209600
+      VisibilityTimeout: 5
+  ProdSqsErrorQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: matillion-error-prod
+      MessageRetentionPeriod: 1209600
+      VisibilityTimeout: 5
+
+  TestSqsSuccessQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: matillion-success-test
+      MessageRetentionPeriod: 1209600
+      VisibilityTimeout: 5
+  TestSqsSuccessQueuesPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref TestSqsSuccessQueue
+      PolicyDocument:
+        Statement:
+          -
+            Action:
+              - sqs:DeleteMessage
+              - sqs:ListQueues
+              - sqs:ReceiveMessage
+              - sqs:SendMessage
+              - sqs:GetQueueUrl
+            Effect: "Allow"
+            Resource: !GetAtt TestSqsSuccessQueue.Arn
+            Principal:
+              AWS:
+                - !Ref AwsAccountNumberTestEnvironment
+                - !Ref AwsAccountNumberProdEnvironment
+
+  TestSqsErrorQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: matillion-error-test
+      MessageRetentionPeriod: 1209600
+      VisibilityTimeout: 5
+  TestSqsErrorQueuesPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref TestSqsErrorQueue
+      PolicyDocument:
+        Statement:
+          -
+            Action:
+              - sqs:DeleteMessage
+              - sqs:ListQueues
+              - sqs:ReceiveMessage
+              - sqs:SendMessage
+              - sqs:GetQueueUrl
+            Effect: "Allow"
+            Resource: !GetAtt TestSqsErrorQueue.Arn
+            Principal:
+              AWS:
+                - !Ref AwsAccountNumberTestEnvironment
+                - !Ref AwsAccountNumberProdEnvironment
+
+  DevSqsSuccessQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: matillion-success-dev
+      MessageRetentionPeriod: 1209600
+      VisibilityTimeout: 5
+  DevSqsSuccessQueuesPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref DevSqsSuccessQueue
+      PolicyDocument:
+        Statement:
+          -
+            Action:
+              - sqs:DeleteMessage
+              - sqs:ListQueues
+              - sqs:ReceiveMessage
+              - sqs:SendMessage
+              - sqs:GetQueueUrl
+            Effect: "Allow"
+            Resource: !GetAtt DevSqsSuccessQueue.Arn
+            Principal:
+              AWS:
+                - !Ref AwsAccountNumberTestEnvironment
+                - !Ref AwsAccountNumberProdEnvironment
+
+  DevSqsErrorQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: matillion-error-dev
+      MessageRetentionPeriod: 1209600
+      VisibilityTimeout: 5
+  DevSqsErrorQueuesPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref DevSqsErrorQueue
+      PolicyDocument:
+        Statement:
+          -
+            Action:
+              - sqs:DeleteMessage
+              - sqs:ListQueues
+              - sqs:ReceiveMessage
+              - sqs:SendMessage
+              - sqs:GetQueueUrl
+            Effect: "Allow"
+            Resource: !GetAtt DevSqsErrorQueue.Arn
+            Principal:
+              AWS:
+                - !Ref AwsAccountNumberTestEnvironment
+                - !Ref AwsAccountNumberProdEnvironment
+
+### scheduling turn on/turn off stuff (custom)
+  RoleForLambdaTurnOnOff:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ''
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaTurnOnOffPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - ec2:StopInstances
+                  - ec2:StartInstances
+                Resource:
+                  - arn:aws:logs:*:*:*
+                  - arn:aws:ec2:*
+      Path: /
+  LambdaStopEC2Instances:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: >
+          import boto3;import os;
+          ec2 = boto3.client('ec2')
+
+          def handler(event, context):
+            try:
+              response = ec2.stop_instances(InstanceIds=[os.environ["MATILLION_INSTANCE_ID"]], DryRun=False)
+              print(response)
+            except Exception as e:
+              print(e)
+              raise e
+      Handler: index.handler
+      Role: !GetAtt 'RoleForLambdaTurnOnOff.Arn'
+      Runtime: python3.6
+      Timeout: '300'
+      Environment:
+        Variables:
+          MATILLION_INSTANCE_ID: !Ref 'Ec2Instance0'
+
+  LambdaStartEC2Instances:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: >
+          import boto3;import os;
+          ec2 = boto3.client('ec2')
+
+          def handler(event, context):
+            try:
+              response = ec2.start_instances(InstanceIds=[os.environ["MATILLION_INSTANCE_ID"]], DryRun=False)
+              print(response)
+            except Exception as e:
+              print(e)
+              raise(e)
+      Handler: index.handler
+      Role: !GetAtt 'RoleForLambdaTurnOnOff.Arn'
+      Runtime: python3.6
+      Timeout: '900'
+      Environment:
+        Variables:
+          MATILLION_INSTANCE_ID: !Ref 'Ec2Instance0'
+
+  StopEC2InstancesRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: StopEC2Instances
+      ScheduleExpression: !Ref 'CronStopSchedule'
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt 'LambdaStopEC2Instances.Arn'
+          Id: stopEC2Instances
+
+  StartEC2InstancesRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: StartEC2Instances
+      ScheduleExpression: !Ref 'CronStartSchedule'
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt 'LambdaStartEC2Instances.Arn'
+          Id: startEC2Instances
+
+  LambdaInvokePermissionStop:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt 'LambdaStopEC2Instances.Arn'
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt 'StopEC2InstancesRule.Arn'
+
+  LambdaInvokePermissionStart:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt 'LambdaStartEC2Instances.Arn'
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt 'StartEC2InstancesRule.Arn'
+
+  MatillionEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: 'vpc'
+
+  MatillionEIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      EIP: !Ref 'MatillionEIP'
+      InstanceId: !Ref 'Ec2Instance0'
+
+
+  MatillionDNSRecord:
+      Type: AWS::Route53::RecordSet
+      Properties:
+        HostedZoneId: !Ref 'MatillionHostedZone'
+        Comment: DNS name for my instance.
+        Name: 'matillion.homegate.ch.'
+        Type: A
+        TTL: '900'
+        ResourceRecords:
+        - !Ref 'MatillionEIP'
+
